@@ -19,6 +19,7 @@ the following packages are needed
 - websockets
 - asyncio
 - pygame
+
 to install then open your cmd and type for vrchatapi as example "pip install vrchatapi"
 for beginner i will soon make an installer script
 
