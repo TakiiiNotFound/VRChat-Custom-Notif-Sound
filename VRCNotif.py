@@ -131,25 +131,34 @@ def play_audio(event):
         pygame.mixer.music.play()
 
 async def connect_to_websocket():
-    # Load auth token from cookies
-    auth_token = load_cookies(api_client, "./cookies.txt")
-    if auth_token:
-        uri = f"wss://pipeline.vrchat.cloud/?authToken={auth_token}"
-        user_agent = "CustomNotifSounds/1.0 my@email.com"
+    while True:
+        try:
+            # Load auth token from cookies
+            auth_token = load_cookies(api_client, "./cookies.txt")
+            if auth_token:
+                uri = f"wss://pipeline.vrchat.cloud/?authToken={auth_token}"
+                user_agent = "CustomNotifSounds/1.0 my@email.com"
 
-        async with websockets.connect(uri, extra_headers={'User-Agent': user_agent}) as websocket:
-            print(f"Connected to WebSocket")
+                async with websockets.connect(uri, extra_headers={'User-Agent': user_agent}) as websocket:
+                    print(f"Connected to WebSocket")
 
-            while True:
-                message = await websocket.recv()
-                if message.startswith('{"type":"notification"'):
-                    print(f"Received notification")
-                    # Play audio notification
-                    pygame.mixer.music.load("Audio/Notif.wav")
-                    pygame.mixer.music.play()
-                # Do nothing for messages that do not start with '{"type":"notification"'
-    else:
-        print("Auth token not found in cookies.")
+                    while True:
+                        message = await websocket.recv()
+                        if message.startswith('{"type":"notification"'):
+                            print(f"Received notification")
+                            # Play audio notification
+                            pygame.mixer.music.load("Audio/Notif.wav")
+                            pygame.mixer.music.play()
+                        # Do nothing for messages that do not start with '{"type":"notification"'
+            else:
+                print("Auth token not found in cookies.")
+        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError,
+                websockets.exceptions.ConnectionClosedOK, websockets.exceptions.InvalidStatusCode) as e:
+            print(f"WebSocket connection error: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"Unexpected error: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
 
 async def main():
     # Start monitoring VRChat logs and WebSocket connection concurrently
