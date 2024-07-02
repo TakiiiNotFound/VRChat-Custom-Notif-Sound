@@ -13,6 +13,7 @@ the suported action are
 
 # Requirements
 python3 is needed https://www.python.org/downloads/
+
 the following packages are needed 
 - vrchatapi
 - requests
@@ -25,3 +26,11 @@ for beginner i will soon make an installer script
 
 
 feel free to use anything on this project BUT THE AUDIO FILES i warn you i dont own the audio file
+
+0.1
+
+initial release
+
+0.2
+
+fix crash when the websocket get disconected
