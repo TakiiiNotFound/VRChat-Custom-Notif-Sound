@@ -1,21 +1,40 @@
 import os
 import re
-import time
 import vrchatapi
-from vrchatapi.api import authentication_api, avatars_api
-from vrchatapi.exceptions import UnauthorizedException, ApiException
+from vrchatapi.api import authentication_api
+from vrchatapi.exceptions import UnauthorizedException
 from vrchatapi.models.two_factor_auth_code import TwoFactorAuthCode
 from vrchatapi.models.two_factor_email_code import TwoFactorEmailCode
 from http.cookiejar import LWPCookieJar
-import json
-import requests
 import asyncio
 import websockets
 import pygame
 import glob
+from colorama import init, Fore, Style  # Import colorama for colored output
+from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+
+# Initialize Colorama
+init(autoreset=True)
 
 # Initialize pygame audio
 pygame.mixer.init()
+
+# Audio file paths
+MUSIC_FILE = "Audio/Music.wav"
+JOIN_FILE = "Audio/Join.wav"
+LEAVE_FILE = "Audio/Leave.wav"
+LOGGED_FILE = "Audio/Logged.wav"
+NOTIF_FILE = "Audio/Notif.wav"
+
+# Global variables for managing volume control
+vrchat_volume = 1.0  # Initial volume (100%)
+
+def set_vrchat_volume(volume):
+    sessions = AudioUtilities.GetAllSessions()
+    for session in sessions:
+        volume_interface = session._ctl.QueryInterface(ISimpleAudioVolume)
+        if session.Process and session.Process.name() == "VRChat.exe":
+            volume_interface.SetMasterVolume(volume, None)
 
 def save_cookies(client: vrchatapi.ApiClient, filename: str):
     cookie_jar = LWPCookieJar(filename=filename)
@@ -51,44 +70,61 @@ def load_credentials():
     except FileNotFoundError:
         return None, None
 
-def find_vrchat_log_directory():
-    # Build VRChat log directory path
-    user_profile = os.getenv('USERPROFILE')
-    if user_profile:
-        vrchat_log_dir = os.path.join(user_profile, "AppData", "LocalLow", "VRChat", "VRChat")
-        return vrchat_log_dir
-    else:
-        return None
+def play_effect(file_path):
+    sound = pygame.mixer.Sound(file_path)
+    sound.play()
 
-async def monitor_vrchat_logs():
-    vrchat_log_dir = find_vrchat_log_directory()
-    if not vrchat_log_dir:
-        print("VRChat log directory not found.")
+async def connect_to_websocket(api_client: vrchatapi.ApiClient):
+    auth_token = load_cookies(api_client, "./cookies.txt")
+    if not auth_token:
+        print("Auth token not found in cookies.")
         return
 
-    print(f"Monitoring VRChat log directory: {vrchat_log_dir}")
+    uri = f"wss://pipeline.vrchat.cloud/?authToken={auth_token}"
+    user_agent = "CustomNotifSounds/1.0 my@email.com"
+
+    try:
+        async with websockets.connect(uri, extra_headers={'User-Agent': user_agent}) as websocket:
+            print(f"Connected to WebSocket")
+            while True:
+                message = await websocket.recv()
+                if message.startswith('{"type":"notification"'):
+                    print(f"{Fore.LIGHTBLUE_EX}[Notification] {Style.RESET_ALL}Received notification")
+                    play_effect(NOTIF_FILE)
+    except (websockets.ConnectionClosed, websockets.ConnectionClosedError, websockets.InvalidStatusCode) as e:
+        print(f"Connection lost. Reconnecting in 5 seconds... Error: {e}")
+        await asyncio.sleep(5)  # Wait before trying to reconnect
+
+async def monitor_vrchat_logs(api_client: vrchatapi.ApiClient):
+    vrchat_log_dir = find_vrchat_log_directory()
+    if not vrchat_log_dir:
+        print(f"VRChat log directory not found.")
+        return
 
     # Regular expression patterns for events in logs
     patterns = {
-        'OnConnected': re.compile(r".*OnConnected.*"),
-        'OnPlayerJoined': re.compile(r".*OnPlayerJoined.*"),
-        'OnPlayerLeft': re.compile(r".*OnPlayerLeft.*")
+        'Lifting black fade': re.compile(r".*Lifting black fade(.*)"),
+        'OnLeftRoom': re.compile(r".*OnLeftRoom(.*)"),
+        'OnPlayerJoined': re.compile(r".*OnPlayerJoined(.*)"),
+        'OnPlayerLeft': re.compile(r".*OnPlayerLeft([^R].*)"),  # Exclude lines ending with 'Room'
+        'Authenticated via': re.compile(r".*Authenticated via(.*)")
     }
 
     initial_files = set(glob.glob(os.path.join(vrchat_log_dir, "output_log_*.txt")))
     processed_files = set()
     latest_file = None
 
-    no_new_file_count = 0
-
-    while True:
+    while True:  # Infinite loop for continuous monitoring
         log_files = set(glob.glob(os.path.join(vrchat_log_dir, "output_log_*.txt")))
         new_files = log_files - initial_files - processed_files
 
         if new_files:
             latest_file = max(new_files, key=os.path.getmtime)
-            print(f"New log file detected: {latest_file}")
-            no_new_file_count = 0  # Reset the counter since we found a new file
+
+            # Set VRChat.exe volume to 0% and play background music
+            set_vrchat_volume(0.0)
+            pygame.mixer.music.load(MUSIC_FILE)
+            pygame.mixer.music.play(-1)  # Loop indefinitely
 
             with open(latest_file, 'r', encoding='utf-8', errors='ignore') as f:
                 f.seek(0, os.SEEK_END)  # Move to the end of the file
@@ -96,78 +132,56 @@ async def monitor_vrchat_logs():
                 while True:
                     line = f.readline()
                     if not line:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.25)  # Adjust scan frequency (4 times per second)
                         continue
 
+                    matched_event = None
                     for event, pattern in patterns.items():
-                        if re.search(pattern, line):
-                            print(f"Detected event '{event}' in log line: {line.strip()}")
-                            play_audio(event)
+                        match = re.search(pattern, line)
+                        if match:
+                            matched_event = event
+                            event_text = match.group(1).strip()
+                            break
+
+                    if matched_event:
+                        if matched_event == 'Lifting black fade':
+                            # Set VRChat.exe volume to 100% and stop background music
+                            set_vrchat_volume(1.0)
+                            pygame.mixer.music.stop()
+                        elif matched_event == 'OnLeftRoom':
+                            # Set VRChat.exe volume to 0% and play background music
+                            set_vrchat_volume(0.0)
+                            pygame.mixer.music.load(MUSIC_FILE)
+                            pygame.mixer.music.play(-1)  # Loop indefinitely
+                        elif matched_event == 'OnPlayerJoined':
+                            print(f"{Fore.LIGHTGREEN_EX}[Join]{Style.RESET_ALL} {event_text}")
+                            play_effect(JOIN_FILE)
+                        elif matched_event == 'OnPlayerLeft':
+                            print(f"{Fore.RED}[Left]{Style.RESET_ALL} {event_text}")
+                            play_effect(LEAVE_FILE)
+                        elif matched_event == 'Authenticated via':
+                            print(f"{Fore.LIGHTBLUE_EX}[Logged]{Style.RESET_ALL} {event_text}")
+                            play_effect(LOGGED_FILE)
 
             processed_files.add(latest_file)
 
         else:
-            no_new_file_count += 1
-            if no_new_file_count >= 10:
-                print("No new log file detected after 10 scans. Stopping the scan.")
-                break
-            else:
-                print(f"No new log file detected. Attempt {no_new_file_count}/10")
+            await asyncio.sleep(0.25)  # Adjust scan frequency (4 times per second)
 
-        await asyncio.sleep(10)  # Adjust the scan interval as needed
+def find_vrchat_log_directory():
+    # Example: Adjust this function to find your VRChat log directory
+    possible_paths = [
+        os.path.expanduser("~/AppData/LocalLow/VRChat/VRChat/"),
+        os.path.expanduser("~/Library/Application Support/VRChat/VRChat/")
+    ]
 
-def play_audio(event):
-    # Map events to corresponding audio files
-    audio_files = {
-        'OnConnected': "Audio/LoadedIn.wav",
-        'OnPlayerJoined': "Audio/Join.wav",
-        'OnPlayerLeft': "Audio/Leave.wav"
-    }
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
 
-    audio_file = audio_files.get(event)
-    if audio_file:
-        print(f"Playing audio for event '{event}'")
-        pygame.mixer.music.load(audio_file)
-        pygame.mixer.music.play()
-
-async def connect_to_websocket():
-    while True:
-        try:
-            # Load auth token from cookies
-            auth_token = load_cookies(api_client, "./cookies.txt")
-            if auth_token:
-                uri = f"wss://pipeline.vrchat.cloud/?authToken={auth_token}"
-                user_agent = "CustomNotifSounds/1.0 my@email.com"
-
-                async with websockets.connect(uri, extra_headers={'User-Agent': user_agent}) as websocket:
-                    print(f"Connected to WebSocket")
-
-                    while True:
-                        message = await websocket.recv()
-                        if message.startswith('{"type":"notification"'):
-                            print(f"Received notification")
-                            # Play audio notification
-                            pygame.mixer.music.load("Audio/Notif.wav")
-                            pygame.mixer.music.play()
-                        # Do nothing for messages that do not start with '{"type":"notification"'
-            else:
-                print("Auth token not found in cookies.")
-        except (websockets.exceptions.ConnectionClosed, websockets.exceptions.ConnectionClosedError,
-                websockets.exceptions.ConnectionClosedOK, websockets.exceptions.InvalidStatusCode) as e:
-            print(f"WebSocket connection error: {e}. Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
-        except Exception as e:
-            print(f"Unexpected error: {e}. Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
+    return None
 
 async def main():
-    # Start monitoring VRChat logs and WebSocket connection concurrently
-    await asyncio.gather(
-        monitor_vrchat_logs(),
-        connect_to_websocket()
-    )
-
-if __name__ == "__main__":
     saved_username, saved_password = load_credentials()
 
     if saved_username and saved_password:
@@ -194,24 +208,30 @@ if __name__ == "__main__":
         try:
             current_user = auth_api.get_current_user()
         except ValueError:
-            auth_api.verify2_fa_email_code(two_factor_email_code=TwoFactorEmailCode(input("Email 2FA Code: ")))
+            auth_api.verify2_fa_email_code(TwoFactorEmailCode(input("Email 2FA Code: ")))
             current_user = auth_api.get_current_user()
             save_cookies(api_client, "./cookies.txt")
         except UnauthorizedException as e:
             print(e)
             if e.status == 200:
                 if "Email 2 Factor Authentication" in e.reason:
-                    auth_api.verify2_fa_email_code(two_factor_email_code=TwoFactorEmailCode(input("Email 2FA Code: ")))
+                    auth_api.verify2_fa_email_code(TwoFactorEmailCode(input("Email 2FA Code: ")))
                 elif "2 Factor Authentication" in e.reason:
-                    auth_api.verify2_fa(two_factor_auth_code=TwoFactorAuthCode(input("2FA Code: ")))
+                    auth_api.verify2_fa(TwoFactorAuthCode(input("2FA Code: ")))
                 current_user = auth_api.get_current_user()
                 save_cookies(api_client, "./cookies.txt")
             else:
-                print("Exception when calling API: %s\n", e)
+                print(f"Exception when calling API: {e}")
         except vrchatapi.ApiException as e:
-            print("Exception when calling API: %s\n", e)
+            print(f"Exception when calling API: {e}")
 
         print("Logged in as:", current_user.display_name)
 
-        # Run asyncio main loop for WebSocket connection and log monitoring
-        asyncio.run(main())
+        tasks = [
+            asyncio.create_task(connect_to_websocket(api_client)),
+            asyncio.create_task(monitor_vrchat_logs(api_client))
+        ]
+        await asyncio.gather(*tasks)
+
+if __name__ == "__main__":
+    asyncio.run(main())
